@@ -1,118 +1,129 @@
-from flask import Flask, jsonify
-from zitado_pb2 import GetPlayerPersonalShowRequest
-from uid_generator_pb2 import UID
-import requests
-from secret import key, iv
 from Crypto.Cipher import AES
-import base64
-
+from Crypto.Util.Padding import pad
+import binascii
+import hashlib
+from secret import*
+import uid_generator_pb2
+import requests
+import struct
+import datetime
+from flask import Flask, jsonify
+import json
+from zitado_pb2 import Users
+import random
 app = Flask(__name__)
+def hex_to_bytes(hex_string):
+    return bytes.fromhex(hex_string)
 
+def create_protobuf(saturn_, garena):
+    message = uid_generator_pb2.uid_generator()
+    message.saturn_ = saturn_
+    message.garena = garena
+    return message.SerializeToString()
 
-def create_protobuf(uid, region):
-    data = GetPlayerPersonalShowRequest()
-    data.uid = uid
-    data.server = region
-    return data
-
-
-def protobuf_to_hex(data):
-    return data.SerializeToString().hex()
-
-
-def encrypt_aes(hex_string, key, iv):
-    raw = bytes.fromhex(hex_string)
-    cipher = AES.new(key.encode('utf-8'), AES.MODE_CBC, iv.encode('utf-8'))
-    padded = raw + (16 - len(raw) % 16) * bytes([16 - len(raw) % 16])
-    encrypted = cipher.encrypt(padded)
-    return base64.b64encode(encrypted).decode('utf-8')
-
-
-def token():
-    try:
-        tokens = requests.get("http://147.93.123.53:5001/token").json()
-        return tokens['token']
-    except Exception as e:
-        return None
-
-
-def apis(encrypted_data, token):
-    if not token:
-        return None
+def protobuf_to_hex(protobuf_data):
+    return binascii.hexlify(protobuf_data).decode()
+def decode_hex(hex_string):
+    byte_data = binascii.unhexlify(hex_string.replace(' ', ''))
+    users = Users()
+    users.ParseFromString(byte_data)
+    return users
+def encrypt_aes(hex_data, key, iv):
+    key = key.encode()[:16]
+    iv = iv.encode()[:16]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    padded_data = pad(bytes.fromhex(hex_data), AES.block_size)
+    encrypted_data = cipher.encrypt(padded_data)
+    return binascii.hexlify(encrypted_data).decode()
+def apis(idd, token):
     headers = {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'FreeFire/1.99.1 (Linux; U; Android 10; IN)',
-        'Authorization': token
+    'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)',
+    'Connection': 'Keep-Alive',
+    'Expect': '100-continue',
+    'Authorization': f'Bearer {token}',
+    'X-Unity-Version': '2018.4.11f1',
+    'X-GA': 'v1 1',
+    'ReleaseVersion': 'OB48',
+    'Content-Type': 'application/x-www-form-urlencoded',
     }
-    try:
-        response = requests.post('https://clientbp.ggblueshark.com/GetPlayerPersonalShow',
-                                 data=encrypted_data, headers=headers)
-        return response.content
-    except Exception:
-        return None
+    data = bytes.fromhex(idd)
+    response = requests.post('https://clientbp.ggblueshark.com/GetPlayerPersonalShow', headers=headers, data=data)
 
+    hex_response = response.content.hex()
 
-def decode_hex(data):
-    final_data = UID()
-    final_data.ParseFromString(data)
-    return final_data
-
-
+    return hex_response
+def token():
+    tokens = requests.get("http://147.93.123.53:5001/token").json()
+    token_list = tokens['tokens']
+    print(token_list)
+    random_token = random.choice(token_list)
+    return random_token
 @app.route('/<uid>', methods=['GET'])
 def main(uid):
+    saturn_ = int(uid)
+    garena = 1
+    protobuf_data = create_protobuf(saturn_, garena)
+    hex_data = protobuf_to_hex(protobuf_data)
+    aes_key = (key)
+    aes_iv = (iv)
+    encrypted_hex = encrypt_aes(hex_data, aes_key, aes_iv)
+    tokenn = token()
+    infoo = apis(encrypted_hex, tokenn)
+    hex_data = infoo
+    if not hex_data:
+        return jsonify({"error": "hex_data query parameter is missing"}), 400
+
     try:
-        uid_int = int(uid)
-        region = 1
+        users = decode_hex(hex_data)
+    except binascii.Error:
+        return jsonify({"error": "Invalid hex data"}), 400
 
-        # Protobuf
-        protobuf_data = create_protobuf(uid_int, region)
-        hex_data = protobuf_to_hex(protobuf_data)
+    result = {}
 
-        # AES Encryption
-        encrypted_hex = encrypt_aes(hex_data, key, iv)
+    if users.basicinfo:
+        result['basicinfo'] = []
+        for user_info in users.basicinfo:
+            result['basicinfo'].append({
+                'username': user_info.username,
+                'region': user_info.region,
+                'level': user_info.level,
+                'Exp': user_info.Exp,
+                'bio': users.bioinfo[0].bio if users.bioinfo else None,  
+                'banner': user_info.banner,
+                'avatar': user_info.avatar,
+                'brrankscore': user_info.brrankscore,
+                'BadgeCount': user_info.BadgeCount,
+                'likes': user_info.likes,
+                'lastlogin': user_info.lastlogin,
+                'csrankpoint': user_info.csrankpoint,
+                'csrankscore': user_info.csrankscore,
+                'brrankpoint': user_info.brrankpoint,
+                'createat': user_info.createat,
+                'OB': user_info.OB
+            })
+    if users.claninfo:
+        result['claninfo'] = []
+        for clan in users.claninfo:
+            result['claninfo'].append({
+                'clanid': clan.clanid,
+                'clanname': clan.clanname,
+                'guildlevel': clan.guildlevel,
+                'livemember': clan.livemember
+            })
 
-        # Token + API Call
-        jwt = token()
-        if not jwt:
-            return jsonify({"error": "Token fetch failed"}), 500
-
-        response_data = apis(encrypted_hex, jwt)
-        if not response_data:
-            return jsonify({"error": "API call failed or returned nothing"}), 500
-
-        # Decode protobuf
-        try:
-            decoded = decode_hex(response_data)
-        except Exception as e:
-            return jsonify({"error": "Decoding error", "details": str(e)}), 500
-
-        # Build response
-        result = {}
-        if decoded.basicinfo:
-            result['basicinfo'] = []
-            for info in decoded.basicinfo:
-                result['basicinfo'].append({
-                    'username': info.username,
-                    'region': info.region,
-                    'level': info.level,
-                    'Exp': info.Exp,
-                    'bio': decoded.bioinfo[0].bio if decoded.bioinfo else None,
-                    'banner': info.banner,
-                    'avatar': info.avatar,
-                    'brrankscore': info.brrankscore,
-                    'BadgeCount': info.BadgeCount,
-                    'likes': info.likes,
-                    'lastlogin': info.lastlogin,
-                    'csrankpoint': info.csrankpoint,
-                    'csrankscore': info.csrankscore,
-                    'brrankpoint': info.brrankpoint,
-                })
-
-        return jsonify(result), 200
-
-    except Exception as e:
-        return jsonify({"error": "Unexpected server error", "details": str(e)}), 500
-
-
-if __name__ == '__main__':
-    app.run()
+    if users.clanadmin:
+        result['clanadmin'] = []
+        for admin in users.clanadmin:
+            result['clanadmin'].append({
+                'idadmin': admin.idadmin,
+                'adminname': admin.adminname,
+                'level': admin.level,
+                'exp': admin.exp,
+                'brpoint': admin.brpoint,
+                'lastlogin': admin.lastlogin,
+                'cspoint': admin.cspoint
+            })
+    result['Owners'] = ['Ujjaiwal']
+    return jsonify(result)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5002)
